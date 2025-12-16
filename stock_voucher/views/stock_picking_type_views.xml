@@ -20,7 +20,7 @@
                      </group>
                 </group>
             </xpath>
-            <field name="show_entire_packs" position="after">
+            <field name="set_package_type" position="after">
                 <field name="number_of_packages"/>
             </field>
         </field>
