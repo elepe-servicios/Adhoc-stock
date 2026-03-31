@@ -10,6 +10,7 @@
 
     * Permite utilizar operadores &, | y ~ para combinar condiciones de forma más legible y mantenible.
     * Se pueden utilizar sobre función `filtered`.
+    * También se puede usar `Domain('field', 'op', 'value')` o `Domain(domain)` donde domain es una lista como era habitual `[('field_1', 'op1', 'value1'), ('field_2', 'op2', 'value2'), ...]`.
   * nueva API para manejo de progresos en crons,
 
     * Se cambia `notify_progress` por `commit_progress` en crons, ej.
@@ -31,6 +32,8 @@
 
    * Si ya existe un docstring, puede sugerirse un estilo básico acorde a PEP8, pero **no será un error** si faltan `return`, tipos o parámetros documentados.
 5. No proponer cambios puramente estéticos (espacios, comillas simples vs dobles, orden de imports, etc.).
+6. Mantener el feedback **muy conciso** en los PRs: priorizar pocos puntos claros, evitar párrafos largos y no repetir el contexto que ya está explicado en la descripción del PR.
+7. Sobre traducciones: usar `_()` o `self.env._()` es indistinto; solo marcar si hay mensajes de error o textos no traducidos que deban serlo.
 
 ---
 
@@ -59,13 +62,6 @@
 * Confirmar que todos los archivos usados (vistas, seguridad, datos, reportes, wizards) estén referenciados en el manifest.
 * Verificar dependencias declaradas: que no falten módulos requeridos ni se declaren innecesarios.
 * **Regla de versión (obligatoria):**
-  Siempre que el diff incluya **modificaciones en**:
-
-  * definición de campos o modelos (`models/*.py`, `wizards/*.py`),
-  * vistas o datos XML (`views/*.xml`, `data/*.xml`, `report/*.xml`, `wizards/*.xml`),
-  * seguridad (`security/*.csv`, `security/*.xml`),
-
-  **y el `__manifest__.py` no incrementa `version`, sugerir el bump de versión** (por ejemplo, `1.0.0 → 1.0.1`).
 * Solo hacerlo una vez por revisión, aunque haya múltiples archivos afectados.
 
 ---
@@ -82,7 +78,6 @@
 
 * Verificar los archivos `ir.model.access.csv` para nuevos modelos: deben tener permisos mínimos necesarios.
 * No proponer abrir acceso global sin justificación.
-* Si se agregan nuevos modelos o campos de control de acceso, **recordar el bump de versión** (ver sección de manifest).
 * En Odoo 19, poner atención especial a cambios de seguridad ligados a:
 
   * integraciones de IA,
@@ -98,60 +93,187 @@
 * Si se ve `eval()` o domains construidos como strings a partir de input externo, advertir del riesgo de ejecución arbitraria y sugerir el uso de objetos `Domain` o listas de tuplas.
   * Ejemplo a evitar: `domain = "[('name','ilike','%s')]" % user_input; records = self.env['res.partner'].search(eval(domain))`.
   * Alternativa segura: `records = self.env['res.partner'].search([('name', 'ilike', user_input)])` o `Domain([('name', 'ilike', user_input)])`.
+  * Nota: En Odoo 19, `Domain('field', 'op', 'value')` es válido y no debe marcarse como incorrecto. Los operadores `&`, `|` y `~` pueden usarse sobre instancias de `Domain` para combinar condiciones.
 * Reforzar las recomendaciones de rendimiento conocidas: evitar `search([])` seguido de filtrado en Python, evitar loops con `write`/`search` uno a uno, y proponer alternativas como `search_count`, `mapped`, `filtered`, `browse(ids)` o `search_fetch` para lecturas planas.
   * Ejemplo de mejora: usar `gmail_count = self.env['res.partner'].search_count([('email', 'ilike', 'gmail')])` en lugar de recorrer todos los partners buscando “gmail”.
   * Para lecturas masivas, preferir `names = partners.mapped('name')` frente a acumular manualmente en un bucle, y usar `search_fetch` cuando se necesiten diccionarios planos.
 * En operaciones masivas, promover writes vectorizados y recomputes en lotes; en v19 se pueden combinar con `env.cr.commit()` controlado o helpers de progreso (`_commit_progress`) cuando el diff ya manipula crons.
   * Ejemplo sugerido: `partners.write({'comment': 'Actualizado masivamente'})` y `_commit_progress(processed=len(partners))` en jobs largos.
 * Recordar que estas prácticas no solo mejoran performance: al mantenerse dentro del ORM se heredan los controles de acceso, auditoría y reglas multi-compañía.
+* Tener en cuenta la **navegación de campos relacionales** en Odoo: acceder a campos encadenados como `m.fiscal_position_id.l10n_ar_tax_ids` es seguro incluso cuando `fiscal_position_id` está vacío (devuelve un recordset vacío). Por eso, expresiones como `not m.fiscal_position_id.l10n_ar_tax_ids` ya cubren el caso en que no haya posición fiscal y **no hace falta** añadir un chequeo previo separado sobre `fiscal_position_id`.
+* Revisar accesos directos por índice en listas o recordsets, por ejemplo `lines[0].id`: si el conjunto está vacío puede lanzar `IndexError`. Copilot debe sugerir patrones más seguros (por ejemplo `if lines: first = lines[0]`) o, cuando sea posible, reescribir la lógica para trabajar sobre el recordset completo en lugar de un único elemento.
 
 ---
 
-## Cambios estructurales y scripts de migración – **cuestiones generales (v18+v19)**
+## Cambios estructurales y scripts de migración – **cuestiones generales**
 
-Las mismas reglas generales descritas en la sección de Odoo 18 se aplican también aquí. Copilot debe reutilizar la misma lógica para decidir si pide migración o no:
+Cuando el diff sugiera **cambios de estructura de datos**, **siempre evaluar** si corresponde proponer un **script de migración** en `migrations/` (pre/post/end).
 
-1. Renombres de campos **almacenados** y de modelos.
-2. Cambios de tipo con impacto real en la representación en DB (no para `Char → Text` u otros cambios triviales).
-3. Eliminación de campos con reestructuración de datos.
-4. Nuevos campos `compute` con `store=True` que requieren backfill, con advertencias en modelos muy grandes.
-5. Cambios de dominios o **eliminación/renombre** de valores de `selection` (añadir keys nuevas no requiere script en general).
-6. Cambios o adición de `_sql_constraints` / índices con riesgo de conflicto con datos existentes (al menos emitir **advertencia**).
-7. Cambios en `ir.model.data` / XML IDs, especialmente con `no_update="1"` cuando el contenido lógico cambia (sugerir forzar el cambio).
-8. Cambios de reglas de acceso / propiedad que requieran recalcular ownership o multi-company.
+### Reglas generales de estructura de `migrations/`
 
-En caso de duda, Copilot debe:
+* La carpeta dentro de `migrations/` debe corresponder con la versión declarada en el manifest (p. ej. `migrations/19.0.1.0/`).
+* Los scripts deben ser idempotentes, trabajar en lotes y registrar logs claros.
 
-* describir el riesgo,
-* sugerir un posible enfoque de migración,
-* pero **no exagerar**: si el cambio es claramente no rompedor (ej. añadir un valor extra de `selection` sin tocar los anteriores), no pedir migración.
+### Ejemplos de cambios estructurales (actualizado con tus criterios)
+
+En estos casos **normalmente corresponde** proponer migración (salvo notas en contra):
+
+1. **Renombrar campos o modelos**
+
+   * **Campos:** proponer migración **solo si el campo es almacenado** en base de datos:
+     * campos normales (`Char`, `Many2one`, `Boolean`, etc.),
+     * campos `compute` con `store=True`.
+     * Campos `compute` **sin** `store=True` no requieren script por el renombre en sí (son virtuales).
+   * **Modelos:** renombrar modelos **siempre** implica revisar migración (`ir.model`, `ir.model.data`, tablas relacionales, vistas, acciones…).
+
+2. **Cambiar tipos de campo**
+
+   * Se considera cambio estructural cuando **cambia la representación en la base de datos** (p.ej. `Char → Many2one`, `Selection → Many2one`, `Integer → Monetary`, `Many2one → Many2many`, etc.).
+   * Cambios “compatibles” a nivel de PostgreSQL **no suelen requerir script**, por ejemplo:
+     * `Char → Text` o ajustes de tamaño de `Char`;
+     * cambios de precisión en `Float` sin cambio de semántica.
+   * Aun así, si el cambio implica lógica nueva (p.ej. pasar de `Boolean` a `Selection` con múltiples estados) puede requerir mapeo de datos.
+
+3. **Quitar campos para reestructurar información**
+
+   * Por ejemplo, dividir un campo en varios (split) o fusionar varios en uno (merge).
+   * Siempre revisar si hay datos que deban preservarse antes de eliminar el campo original.
+
+4. **Agregar campos `compute` almacenados (`store=True`) con backfill**
+
+   * Si el campo nuevo es `compute` y `store=True`, y se espera que tenga valor para **registros históricos**, conviene:
+     * Proponer **script `post`** que haga el backfill **en lotes**.
+     * Añadir una **advertencia explícita** cuando el modelo tiene muchos registros (p.ej. millones) para que el cálculo no se haga en una sola transacción que bloquee la tabla.
+
+5. **Cambiar dominios o valores de campos `selection`**
+
+   * **Añadir nuevos valores de `selection`**:  
+     En general **no requiere migración** si solo se agregan opciones nuevas y no se tocan las existentes.
+   * **Eliminar o renombrar keys existentes de `selection`**:
+     * Puede dejar valores históricos huérfanos o inválidos → proponer script que mapee `old_value → new_value` o que normalice registros antiguos.
+     * Mencionar que hay que tener en cuenta el comportamiento de campos relacionados (p.ej. un `Many2one` con `ondelete` específico) si el `selection` influye en lógica que crea o elimina registros.
+   * **Cambios de dominio** en campos relacionales (`Many2one`, `Many2many`):
+     * Si el nuevo dominio excluye valores usados históricamente, puede ser necesario limpiar o remapear datos para que no queden registros en estados imposibles.
+     * Recordar que el `ondelete` del campo define qué ocurre al eliminar registros apuntados; hay que respetarlo al limpiar datos.
+
+6. **Cambiar o añadir `_sql_constraints` (unique / index)**
+
+   * Cambios en constraints `UNIQUE` o adición de nuevas constraints/índices pueden **fallar con datos existentes** (duplicados, valores nulos, etc.).
+   * Al menos, Copilot debe:
+     * emitir una **advertencia** sobre el riesgo de fallo en el upgrade,
+     * sugerir revisar datos previos (y, cuando se vea necesario, un **pre-script** que limpie duplicados o normalice datos antes de aplicar la constraint).
+
+7. **Cambios en `ir.model.data` / XML IDs**
+
+   * Renombres de XML IDs (`module.name → module2.name2`) o cambios en `module` / `name` suelen requerir:
+     * script para actualizar referencias dependientes (acciones, vistas, menús, records en otros módulos),
+     * o uso de utilidades de upgrade.
+   * Caso especial: registros con `no_update="1"`:
+     * Si cambia solo texto/etiquetas menores, puede no hacer falta migración.
+     * **Si cambia el contenido lógico** (ej. campo `domain`, configuración, secuencias) y el registro tiene `no_update="1"`, debes **sugerir forzar el cambio**:
+       * vía script que actualice explícitamente los registros por su `xml_id`,
+       * o mediante un proceso de “force update” apropiado.
+
+8. **Cambios de reglas de acceso / propiedad**
+
+   * Cambios profundos en `record rules` o en campos que determinan propiedad (company, website, owner…) pueden necesitar scripts para:
+     * recomputar propiedad,
+     * asignar company/website por defecto,
+     * o migrar datos entre reglas.
+
+> **Nota:** No se incluye en esta lista el caso “Añadir `required=True` a campos existentes sin default” como condición automática de migración; Copilot no debe sugerir script de migración **solo** por ese motivo, salvo que en el diff se vea claro que hay datos históricos incompatibles.
 
 ---
 
-## Scripts de migración en `migrations/`: pre / post / end (v19)
+## Cobertura de tests automatizados – reglas generales
 
-* Mismas definiciones y mapeo que en la sección de Odoo 18.
-* En Odoo 19 se pueden mencionar utilidades de `odoo.upgrade.util` (p.ej. `change_field_selection_values`, helpers para índices y constraints) cuando el diff ya usa el módulo de upgrade.([Odoo][5])
-
----
-
-## Convenciones de scripts en `migrations/` (v19)
-
-Iguales que en 18:
-
-* Scripts idempotentes, por lotes, con logs claros.
-* Carpeta `migrations/<module_version>/` alineada con la versión del manifest.
-* `pre_*.py`, `post_*.py` y/o scripts `end` según corresponda.
+* Cuando el diff introduzca **funcionalidad nueva no trivial** (nuevos métodos con lógica compleja, nuevos flujos de negocio, refactors grandes, nuevas APIs, etc.), revisar si existe cobertura de tests razonable para esos cambios.
+* Si no se ve una cobertura clara, sugerir de forma **concreta y breve** qué tipo de test añadir (unitarios de modelo, tests de wizards, tours, pruebas sobre reportes, etc.), sin exigir una suite completa para cada cambio.
+* Para cambios pequeños o puramente cosméticos (ajustes en textos, vistas simples, pequeñas correcciones) **no hace falta** proponer la creación de tests nuevos.
 
 ---
 
-## Checklist rápida para el review (v19)
+## Scripts de migración en `migrations/`: pre / post / end (reglas generales)
+
+> **Objetivo:** preservar datos y mantener instalabilidad/actualizabilidad segura.
+
+- **pre**: Se ejecutan antes de actualizar el módulo. Útiles para preparar datos o estructuras que eviten fallos durante el upgrade.
+- **post**: Se ejecutan justo después de actualizar el módulo. Ideales para recalcular datos, limpiar residuos o ajustar referencias tras el cambio.
+- **end**: Se ejecutan al final de la actualización de todos los módulos. Indicados para tareas globales que dependen de múltiples módulos o para ajustes finales.
+
+### Mapeo de cambio → acción recomendada (actualizado)
+
+* **Rename de campo almacenado (mismo modelo)**
+
+  * **Pre-script**: crear columna/alias temporal o copiar datos del campo viejo al nuevo antes de que Odoo toque el esquema, si el cambio puede romper constraints.
+  * **Post-script**: limpieza de residuos, recomputes de campos derivados si aplica.
+
+* **Renombrar modelo**
+
+  * **Pre-script**: preparar mapeos en `ir.model` y `ir.model.data`, y ajustar referencias técnicas si es necesario.
+  * **Post-script**: re-enlazar vistas, acciones, menús, reglas y volver a chequear accesos.
+
+* **Eliminar campo y mover datos a otros campos (split/merge)**
+
+  * **Pre-script**: copiar datos a los nuevos campos (cuando sea posible) antes de que el schema elimine la columna original.
+  * **Post-script**: normalizar referencias, recalcular computes, limpiar helpers.
+
+* **Agregar campo `compute` con `store=True`**
+
+  * **Pre-script (opcional y solo en modelos muy grandes)**: crear columna en DB o preparar estructura para evitar locks largos.
+  * **Post-script (recomendado)**: backfill **en lotes** para poblar el valor almacenado; es importante para modelos con muchos registros.
+
+* **Cambiar tipo de campo con cambio real de representación**
+
+  * **Pre-script**: crear columna temporal con el nuevo tipo y migrar datos (con conversión).
+  * **Post-script**: intercambiar/renombrar columnas, borrar la vieja, disparar recomputes si hace falta.
+
+* **Cambios en `selection` (eliminar/renombrar keys existentes)**
+
+  * **Pre-script**: mapear valores antiguos → nuevos (tabla de mapeo) usando helpers como `change_field_selection_values()` cuando aplique.
+  * **Post-script**: validar que no quedan valores huérfanos y que las reglas de negocio siguen cumpliéndose.
+  * **Añadir keys nuevas**: **no proponer script** salvo que el diff muestre una migración masiva explícita de valores.
+
+* **Nuevas constraints `_sql_constraints` (unique) / índices**
+
+  * **Pre-script (recomendado cuando haya riesgo)**: detectar y resolver duplicados o datos inconsistentes antes de crear la constraint.
+  * **Post-script**: crear el índice/constraint y, si procede, validar que no haya fallos.
+
+* **Cambios en registros XML con `no_update="1"`**
+
+  * **Post-script**: actualizar esos registros por API (respetando `xml_id`) cuando el contenido lógico haya cambiado y no vaya a ser reaplicado por el upgrade normal.
+
+* **Cambios de reglas de acceso / multi-company / multi-website**
+
+  * **Pre- o post-script** según el caso, para rellenar campos obligatorios (company, website, owner) y evitar que registros queden inaccesibles.
+
+> **Regla general:** si el cambio puede **romper durante el upgrade**, usa **pre-script**; si requiere **recalcular o reaplicar** después del código nuevo, usa **post-script**. Si se necesita una acción global al final, usa **end-script**.
+
+---
+
+## Convenciones de scripts en `migrations/` (generales)
+
+* Ubicación: `migrations/<module_version>/`.
+* Nombres sugeridos:
+
+  * `pre_<breve-descripcion>.py`
+  * `post_<breve-descripcion>.py`
+* Requisitos:
+
+  * Idempotentes (seguros si se ejecutan más de una vez).
+  * En lotes (`batch_size` razonable) para datasets grandes.
+  * Logs claros (uso de `_logger.info`).
+  * Manejo de transacciones cuando aplique (evitar locks largos).
+  * Documentar al inicio **qué suponen** y **qué garantizan**.
+
+---
+
+## Checklist rápida para el review
 
 | Categoría          | Qué comprobar Copilot                                                                                        |
 | ------------------ | ------------------------------------------------------------------------------------------------------------ |
 | Modelos            | Relaciones válidas; constraints; uso de `@api.depends`; `super()` correcto                                   |
 | Vistas XML         | Herencias correctas; campos válidos; adaptación a componentes modernos (IA, secciones, etc.)                 |
-| Manifest           | **Bump de versión obligatorio** si hay cambios en modelos/vistas/seguridad/datos; archivos referenciados     |
 | Seguridad          | Accesos mínimos necesarios; reglas revisadas, en especial para IA/VOIP/WhatsApp                              |
 | Migraciones        | **Si hay cambios estructurales (lista actualizada), sugerir scripts en `migrations/` y describir qué hacen** |
 | Rendimiento / ORM  | Evitar patrones anti-ORM; aprovechar las mejoras del ORM/registro en v19                                     |
@@ -159,37 +281,24 @@ Iguales que en 18:
 
 ---
 
-## Heurística práctica para el bump de versión (v19)
-
-* **SI** el diff toca cualquiera de: `models/`, `views/`, `data/`, `report/`, `security/`, `wizards/`
-  **Y** `__manifest__.py` no cambia `version` → **Sugerir bump**.
-* **SI** hay scripts `migrations/pre_*.py` o `migrations/post_*.py` nuevos → **Sugerir al menos minor bump**.
-* **SI** hay cambios que rompen compatibilidad (renombres, tipos, limpieza agresiva de datos) → **Sugerir minor/major** según impacto.
-
----
-
-## Estilo del feedback (v19)
+## Estilo del feedback
 
 * El feedback debe ser **breve, concreto y accionable**.
+* Priorizar comentarios en forma de **lista corta de puntos** (3–7 ítems) y frases breves en lugar de bloques de texto extensos.
 * Ejemplos rápidos:
 
   * “La constraint nueva podría definirse como `models.Constraint` en lugar de `_sql_constraints`.”
   * “La vista de cotización no está aprovechando las secciones configurables introducidas en 19.”
-  * “Se renombra el campo `state` almacenado; falta bump de versión y script de migración para copiar valores antes del upgrade.”
+  * “Se renombra el campo `state` almacenado; falta script de migración para copiar valores antes del upgrade.”
 
 ---
 
-## Resumen operativo para Copilot (v19)
+## Resumen operativo para Copilot
 
-1. **Aplicar las mismas reglas generales** que en v18 para revisión de código, manifest y migraciones.
-2. **Diferenciar claramente**:
+1. **Si hay cambio estructural (según la lista actualizada) → propone y describe script(s) de migración en `migrations/` (pre/post/end)**, con enfoque idempotente y en lotes.
+2. Distingue entre:
 
-   * cambios estructurales que requieren migración (según la lista ajustada),
-   * de ajustes menores que no la necesitan (p.ej. `Char → Text`, añadir valores de `selection`).
-3. Tener en cuenta las **novedades de Odoo 19**:
+   * **cuestiones generales**,
+   * y **matices específicos de Odoo 19**, por ej. preferir la nueva API de constraints/índices cuando corresponda.
 
-   * preferir la nueva API de constraints/índices cuando corresponda,
-   * revisar cuidadosamente vistas y permisos ligados a IA, Equity, ESG, WhatsApp, VOIP, etc.
-4. Mantener un feedback **conciso y orientado a acción**, evitando micro-comentarios.
-
-[^odoo19]: Resumen basado en las Odoo 19 Release Notes oficiales y artículos técnicos sobre cambios del ORM e índice/constraints en Odoo 19.
+3. Mantén el feedback **concreto, breve y accionable**.
